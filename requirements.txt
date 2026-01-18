@@ -1,0 +1,5 @@
+# Texture Channel Processor Requirements
+Pillow>=10.0.0
+numpy>=1.24.0
+tkinterdnd2>=0.3.0
+pathlib 

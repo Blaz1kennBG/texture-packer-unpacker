@@ -1,0 +1,420 @@
+from PIL import Image, ImageTk
+import os
+from typing import Optional, Dict, List, Tuple, Union
+import numpy as np
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from tkinterdnd2 import TkinterDnD, DND_FILES
+from dataclasses import dataclass
+from enum import Enum
+import threading
+from pathlib import Path
+
+
+class ChannelType(Enum):
+    """Enum for channel types"""
+    RED = "R"
+    GREEN = "G"
+    BLUE = "B"
+    ALPHA = "A"
+
+
+@dataclass
+class ImageConfig:
+    """Configuration class for image processing"""
+    SUPPORTED_FORMATS = [".png", ".dds"]
+    DROP_SIZE = (170, 170)
+    PREVIEW_SIZE = (300, 300)
+    CHANNEL_PREVIEW_SIZE = (180, 180)
+    ZOOM_FACTOR = 1.2
+    MAX_ZOOM = 10.0
+    MIN_ZOOM = 0.1
+
+
+class ImageProcessor:
+    """Handles all image processing operations"""
+    
+    @staticmethod
+    def validate_image_format(file_path: str) -> bool:
+        """Validate if file format is supported"""
+        return any(file_path.lower().endswith(fmt) for fmt in ImageConfig.SUPPORTED_FORMATS)
+    
+    @staticmethod
+    def validate_image_sizes(image_paths: List[Optional[str]]) -> Optional[Tuple[int, int]]:
+        """
+        Validate that all images have the same size
+        Returns the size if valid, None if no images, raises ValueError if sizes mismatch
+        """
+        valid_paths = [path for path in image_paths if path is not None]
+        
+        if not valid_paths:
+            return None
+        
+        images_info = []
+        for path in valid_paths:
+            try:
+                with Image.open(path) as img:
+                    images_info.append({
+                        "path": path,
+                        "name": os.path.basename(path),
+                        "size": img.size
+                    })
+            except Exception as e:
+                raise ValueError(f"Cannot open image {path}: {e}")
+        
+        # Find largest image by pixel count
+        reference = max(images_info, key=lambda i: i["size"][0] * i["size"][1])
+        expected_size = reference["size"]
+        
+        # Check all images have same size
+        for img_info in images_info:
+            if img_info["size"] != expected_size:
+                raise ValueError(
+                    f"Size mismatch: {img_info['name']} ({img_info['size'][0]}x{img_info['size'][1]}) "
+                    f"vs expected {expected_size[0]}x{expected_size[1]} from {reference['name']}"
+                )
+        
+        return expected_size
+    
+    @staticmethod
+    def load_or_create_white_channel(path: Optional[str], size: Tuple[int, int], 
+                                   preserve_transparent: bool = False) -> Image.Image:
+        """Load image channel or create white channel if path is None"""
+        if path is None:
+            return Image.new("L", size, 255)
+        
+        try:
+            img = Image.open(path).convert("RGBA")
+            
+            if img.size != size:
+                img = img.resize(size, Image.Resampling.BICUBIC)
+            
+            if not preserve_transparent:
+                # Convert transparent pixels to white
+                pixels = img.load()
+                for y in range(img.height):
+                    for x in range(img.width):
+                        r, g, b, a = pixels[x, y]
+                        if a == 0:
+                            pixels[x, y] = (255, 255, 255, 0)
+            
+            return img.split()[0]  # Return only first channel as grayscale
+            
+        except Exception as e:
+            raise ValueError(f"Error loading image {path}: {e}")
+    
+    @staticmethod
+    def pack_channels(r_path: Optional[str] = None, g_path: Optional[str] = None, 
+                     b_path: Optional[str] = None, a_path: Optional[str] = None,
+                     preserve_transparent: bool = True) -> Image.Image:
+        """Pack individual channel images into RGBA image"""
+        paths = [r_path, g_path, b_path, a_path]
+        
+        # Validate sizes
+        size = ImageProcessor.validate_image_sizes(paths)
+        if size is None:
+            raise ValueError("No input images provided for channel packing")
+        
+        # Load channels
+        r = ImageProcessor.load_or_create_white_channel(r_path, size, preserve_transparent)
+        g = ImageProcessor.load_or_create_white_channel(g_path, size, preserve_transparent)
+        b = ImageProcessor.load_or_create_white_channel(b_path, size, preserve_transparent)
+        a = ImageProcessor.load_or_create_white_channel(a_path, size, preserve_transparent)
+        
+        return Image.merge("RGBA", (r, g, b, a))
+    
+    @staticmethod
+    def unpack_channels(image_path: str, apply_gamma_correction: bool = False) -> List[Image.Image]:
+        """Unpack RGBA image into individual channel images"""
+        try:
+            img = Image.open(image_path).convert("RGBA")
+            r, g, b, a = img.split()
+            
+            if apply_gamma_correction:
+                channels = [ImageProcessor._apply_gamma_correction(channel) for channel in [r, g, b, a]]
+            else:
+                channels = [r, g, b, a]
+            
+            return channels
+            
+        except Exception as e:
+            raise ValueError(f"Error unpacking channels from {image_path}: {e}")
+    
+    @staticmethod
+    def _apply_gamma_correction(img: Image.Image) -> Image.Image:
+        """Apply linear to sRGB gamma correction"""
+        arr = np.array(img) / 255.0
+        arr = np.where(arr <= 0.0031308,
+                      arr * 12.92,
+                      1.055 * (arr ** (1 / 2.4)) - 0.055)
+        return Image.fromarray((arr * 255).astype("uint8"))
+    
+    @staticmethod
+    def create_thumbnail(img: Image.Image, size: Tuple[int, int]) -> Image.Image:
+        """Create thumbnail of specified size"""
+        thumb = img.copy()
+        thumb.thumbnail(size, Image.Resampling.LANCZOS)
+        return thumb
+    
+    @staticmethod
+    def save_channels(channels: List[Image.Image], output_dir: str, base_name: str) -> List[str]:
+        """Save individual channels to files"""
+        os.makedirs(output_dir, exist_ok=True)
+        
+        saved_files = []
+        channel_names = ["R", "G", "B", "A"]
+        
+        for i, channel in enumerate(channels):
+            filename = f"{base_name}_{channel_names[i]}.png"
+            filepath = os.path.join(output_dir, filename)
+            channel.save(filepath)
+            saved_files.append(filepath)
+        
+        return saved_files
+
+
+class ZoomableImageViewer:
+    """Reusable zoomable image viewer widget"""
+    
+    def __init__(self, parent: tk.Widget, title: str = "Image Viewer"):
+        self.window = tk.Toplevel(parent)
+        self.window.title(title)
+        self.window.geometry("600x600")
+        
+        self.zoom_factor = 1.0
+        self.original_image = None
+        self.current_image = None
+        self.photo = None
+        self.image_item = None
+        
+        self._setup_ui()
+        self._bind_events()
+    
+    def _setup_ui(self):
+        """Setup the UI components"""
+        # Canvas frame with scrollbars
+        canvas_frame = tk.Frame(self.window)
+        canvas_frame.pack(fill="both", expand=True)
+        
+        self.canvas = tk.Canvas(canvas_frame, bg="gray")
+        h_scrollbar = tk.Scrollbar(canvas_frame, orient="horizontal", command=self.canvas.xview)
+        v_scrollbar = tk.Scrollbar(canvas_frame, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(xscrollcommand=h_scrollbar.set, yscrollcommand=v_scrollbar.set)
+        
+        h_scrollbar.pack(side="bottom", fill="x")
+        v_scrollbar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+    
+    def _bind_events(self):
+        """Bind zoom and navigation events"""
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.window.bind("<Key>", self._on_key_press)
+        self.window.focus_set()
+    
+    def display_image(self, image: Image.Image):
+        """Display an image in the viewer"""
+        self.original_image = image
+        self.zoom_factor = 1.0
+        self._update_display()
+    
+    def _update_display(self):
+        """Update the display with current zoom"""
+        if self.original_image is None:
+            return
+        
+        # Calculate new size
+        original_size = self.original_image.size
+        new_width = int(original_size[0] * self.zoom_factor)
+        new_height = int(original_size[1] * self.zoom_factor)
+        
+        # Resize image
+        self.current_image = self.original_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        self.photo = ImageTk.PhotoImage(self.current_image)
+        
+        # Update canvas
+        if self.image_item:
+            self.canvas.delete(self.image_item)
+        self.image_item = self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+        
+        # Update scroll region and title
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self.window.title(f"Image Viewer - Zoom: {self.zoom_factor:.2f}x")
+    
+    def _zoom(self, factor: float):
+        """Apply zoom factor"""
+        new_zoom = self.zoom_factor * factor
+        if ImageConfig.MIN_ZOOM <= new_zoom <= ImageConfig.MAX_ZOOM:
+            self.zoom_factor = new_zoom
+            self._update_display()
+    
+    def _on_mousewheel(self, event):
+        """Handle mouse wheel zoom"""
+        if event.delta > 0:
+            self._zoom(ImageConfig.ZOOM_FACTOR)
+        else:
+            self._zoom(1 / ImageConfig.ZOOM_FACTOR)
+    
+    def _on_key_press(self, event):
+        """Handle keyboard zoom"""
+        if event.keysym in ["plus", "equal"]:
+            self._zoom(ImageConfig.ZOOM_FACTOR)
+        elif event.keysym == "minus":
+            self._zoom(1 / ImageConfig.ZOOM_FACTOR)
+        elif event.keysym == "0":
+            self.zoom_factor = 1.0
+            self._update_display()
+
+
+class FileDropHandler:
+    """Handles file drop operations with validation"""
+    
+    def __init__(self, on_file_dropped_callback):
+        self.on_file_dropped = on_file_dropped_callback
+    
+    def handle_drop(self, event, **kwargs):
+        """Handle file drop event with validation"""
+        try:
+            filepaths_raw = event.data
+            if not filepaths_raw:
+                return
+            
+            raw = filepaths_raw.strip("{}")
+            path = raw.split()[-1]
+            
+            if not os.path.isfile(path):
+                raise ValueError(f"Not a valid file: {path}")
+            
+            if not ImageProcessor.validate_image_format(path):
+                raise ValueError(f"Unsupported file format. Please use: {', '.join(ImageConfig.SUPPORTED_FORMATS)}")
+            
+            self.on_file_dropped(path, **kwargs)
+            
+        except Exception as e:
+            messagebox.showerror("File Drop Error", str(e))
+
+
+class ChannelPackerModel:
+    """Model class for channel packing functionality"""
+    
+    def __init__(self):
+        self.channel_paths: Dict[str, Optional[str]] = {ch.value: None for ch in ChannelType}
+        self.channel_images: Dict[str, Image.Image] = {}
+        self.merged_image: Optional[Image.Image] = None
+        self.observers = []
+    
+    def add_observer(self, observer):
+        """Add observer for model changes"""
+        self.observers.append(observer)
+    
+    def notify_observers(self, event: str, **kwargs):
+        """Notify all observers of changes"""
+        for observer in self.observers:
+            if hasattr(observer, f'on_{event}'):
+                getattr(observer, f'on_{event}')(**kwargs)
+    
+    def set_channel_image(self, channel: str, image_path: str):
+        """Set image for a specific channel"""
+        try:
+            image = Image.open(image_path)
+            self.channel_paths[channel] = image_path
+            self.channel_images[channel] = image
+            self.notify_observers('channel_updated', channel=channel, image=image, path=image_path)
+        except Exception as e:
+            raise ValueError(f"Error loading image for channel {channel}: {e}")
+    
+    def clear_channel(self, channel: str):
+        """Clear a specific channel"""
+        self.channel_paths[channel] = None
+        self.channel_images.pop(channel, None)
+        self.notify_observers('channel_cleared', channel=channel)
+    
+    def create_merged_image(self) -> Image.Image:
+        """Create merged image from all channels"""
+        try:
+            self.merged_image = ImageProcessor.pack_channels(
+                r_path=self.channel_paths[ChannelType.RED.value],
+                g_path=self.channel_paths[ChannelType.GREEN.value],
+                b_path=self.channel_paths[ChannelType.BLUE.value],
+                a_path=self.channel_paths[ChannelType.ALPHA.value]
+            )
+            self.notify_observers('image_merged', image=self.merged_image)
+            return self.merged_image
+        except Exception as e:
+            raise ValueError(f"Error creating merged image: {e}")
+    
+    def save_merged_image(self, output_path: str):
+        """Save the merged image"""
+        if self.merged_image is None:
+            raise ValueError("No merged image to save")
+        
+        try:
+            self.merged_image.save(output_path)
+            self.notify_observers('image_saved', path=output_path)
+        except Exception as e:
+            raise ValueError(f"Error saving image: {e}")
+
+
+class ChannelUnpackerModel:
+    """Model class for channel unpacking functionality"""
+    
+    def __init__(self):
+        self.source_image: Optional[Image.Image] = None
+        self.source_path: Optional[str] = None
+        self.unpacked_channels: List[Image.Image] = []
+        self.apply_gamma_correction = False
+        self.observers = []
+    
+    def add_observer(self, observer):
+        """Add observer for model changes"""
+        self.observers.append(observer)
+    
+    def notify_observers(self, event: str, **kwargs):
+        """Notify all observers of changes"""
+        for observer in self.observers:
+            if hasattr(observer, f'on_{event}'):
+                getattr(observer, f'on_{event}')(**kwargs)
+    
+    def load_image(self, image_path: str):
+        """Load image for unpacking"""
+        try:
+            self.source_image = Image.open(image_path)
+            self.source_path = image_path
+            self.notify_observers('image_loaded', image=self.source_image, path=image_path)
+        except Exception as e:
+            raise ValueError(f"Error loading image: {e}")
+    
+    def unpack_channels(self):
+        """Unpack the loaded image into channels"""
+        if self.source_path is None:
+            raise ValueError("No image loaded to unpack")
+        
+        try:
+            self.unpacked_channels = ImageProcessor.unpack_channels(
+                self.source_path, self.apply_gamma_correction
+            )
+            self.notify_observers('channels_unpacked', channels=self.unpacked_channels)
+            return self.unpacked_channels
+        except Exception as e:
+            raise ValueError(f"Error unpacking channels: {e}")
+    
+    def save_channels(self, output_dir: str) -> List[str]:
+        """Save unpacked channels to files"""
+        if not self.unpacked_channels:
+            raise ValueError("No channels to save")
+        
+        if self.source_path is None:
+            base_name = "unpacked"
+        else:
+            base_name = Path(self.source_path).stem
+        
+        try:
+            saved_files = ImageProcessor.save_channels(
+                self.unpacked_channels, output_dir, base_name
+            )
+            self.notify_observers('channels_saved', files=saved_files)
+            return saved_files
+        except Exception as e:
+            raise ValueError(f"Error saving channels: {e}")
+
+
+# [Continue with UI classes in next part...]
