@@ -282,6 +282,12 @@ class FileDropHandler:
             path = raw.split()[-1]
             
             if not os.path.isfile(path):
+                print(
+                    f"Dropped item is not a valid file: {path}\n",
+                    f"path: {path}\n",
+                    f"filepaths_raw: {filepaths_raw}"
+                    
+                )
                 raise ValueError(f"Not a valid file: {path}")
             
             if not ImageProcessor.validate_image_format(path):
@@ -299,6 +305,9 @@ class ChannelPackerModel:
     def __init__(self):
         self.channel_paths: Dict[str, Optional[str]] = {ch.value: None for ch in ChannelType}
         self.channel_images: Dict[str, Image.Image] = {}
+        # Store original images for restoration
+        self.original_channel_paths: Dict[str, Optional[str]] = {ch.value: None for ch in ChannelType}
+        self.original_channel_images: Dict[str, Image.Image] = {}
         self.merged_image: Optional[Image.Image] = None
         self.observers = []
     
@@ -312,10 +321,54 @@ class ChannelPackerModel:
             if hasattr(observer, f'on_{event}'):
                 getattr(observer, f'on_{event}')(**kwargs)
     
+    def set_channel_image_with_another_channel(self, curr_channel: str, source_channel: str):
+        """Set image for a specific channel using another channel's image"""
+        # If clicking same channel button, restore original
+        if curr_channel == source_channel:
+            self.restore_original_channel(curr_channel)
+            return
+            
+        if source_channel not in self.channel_images:
+            raise ValueError(f"Source channel {source_channel} has no image set")
+        
+        # Store original before overwriting (if not already stored)
+        if curr_channel not in self.original_channel_images and curr_channel in self.channel_images:
+            self.original_channel_paths[curr_channel] = self.channel_paths[curr_channel]
+            self.original_channel_images[curr_channel] = self.channel_images[curr_channel]
+        
+        # Copy from source channel
+        image = self.channel_images[source_channel]
+        self.channel_paths[curr_channel] = self.channel_paths[source_channel]
+        self.channel_images[curr_channel] = image
+        self.notify_observers('channel_updated', channel=curr_channel, image=image, path=self.channel_paths[source_channel])
+    
+    def restore_original_channel(self, channel: str):
+        """Restore original image for a channel"""
+        if channel in self.original_channel_images:
+            # Restore from backup
+            original_image = self.original_channel_images[channel]
+            original_path = self.original_channel_paths[channel]
+            
+            self.channel_paths[channel] = original_path
+            self.channel_images[channel] = original_image
+            
+            # Clear the backup since we've restored
+            del self.original_channel_images[channel]
+            del self.original_channel_paths[channel]
+            
+            self.notify_observers('channel_updated', channel=channel, image=original_image, path=original_path)
+        # If no original stored, do nothing (already at original state)
+    
     def set_channel_image(self, channel: str, image_path: str):
         """Set image for a specific channel"""
         try:
             image = Image.open(image_path)
+            
+            # Store as original if this is the first time setting this channel
+            if channel not in self.channel_images:
+                self.original_channel_paths[channel] = image_path
+                self.original_channel_images[channel] = image
+            
             self.channel_paths[channel] = image_path
             self.channel_images[channel] = image
             self.notify_observers('channel_updated', channel=channel, image=image, path=image_path)
@@ -326,21 +379,47 @@ class ChannelPackerModel:
         """Clear a specific channel"""
         self.channel_paths[channel] = None
         self.channel_images.pop(channel, None)
+        
+        # Also clear original backups for this channel
+        self.original_channel_paths[channel] = None
+        self.original_channel_images.pop(channel, None)
+        
         self.notify_observers('channel_cleared', channel=channel)
     
-    def create_merged_image(self) -> Image.Image:
-        """Create merged image from all channels"""
+    def create_merged_image(self, target_bit_depth: int = 8) -> Image.Image:
+        """Create merged image from all channels with specified bit depth"""
         try:
-            self.merged_image = ImageProcessor.pack_channels(
+            # First create the merged RGBA image
+            merged_rgba = ImageProcessor.pack_channels(
                 r_path=self.channel_paths[ChannelType.RED.value],
                 g_path=self.channel_paths[ChannelType.GREEN.value],
                 b_path=self.channel_paths[ChannelType.BLUE.value],
                 a_path=self.channel_paths[ChannelType.ALPHA.value]
             )
+            
+            # Apply bit depth conversion
+            self.merged_image = self._convert_to_target_format(merged_rgba, target_bit_depth)
             self.notify_observers('image_merged', image=self.merged_image)
             return self.merged_image
         except Exception as e:
             raise ValueError(f"Error creating merged image: {e}")
+    
+    def _convert_to_target_format(self, image: Image.Image, target_bit_depth: int) -> Image.Image:
+        """Convert image to target format based on bit depth"""
+        if target_bit_depth == 8:
+            # Keep as RGB (no alpha) for 8-bit
+            return image.convert('RGB')
+        elif target_bit_depth == 16:
+            # Convert to 16-bit grayscale 
+            return image.convert('L').convert('I;16')
+        elif target_bit_depth == 24:
+            # 24-bit RGB (8 bits per channel, 3 channels)
+            return image.convert('RGB')
+        elif target_bit_depth == 32:
+            # Keep RGBA for 32-bit (8 bits per channel, 4 channels)
+            return image.convert('RGBA')
+        else:
+            raise ValueError(f"Unsupported bit depth: {target_bit_depth}")
     
     def save_merged_image(self, output_path: str):
         """Save the merged image"""
@@ -349,6 +428,7 @@ class ChannelPackerModel:
         
         try:
             self.merged_image.save(output_path)
+            
             self.notify_observers('image_saved', path=output_path)
         except Exception as e:
             raise ValueError(f"Error saving image: {e}")

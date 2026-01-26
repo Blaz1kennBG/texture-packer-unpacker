@@ -1,6 +1,57 @@
 from texture_processor import *
 import tkinter as tk
 from tkinter import ttk
+import numpy as np
+from PIL import Image
+
+def get_color_bit_depth(im: Image.Image) -> Tuple[int, int]:
+    mode = im.mode
+    # map Pillow modes to bits-per-channel
+    bits_map = {
+        "1": 1,    # 1-bit
+        "L": 8,
+        "P": 8,
+        "RGB": 8,
+        "RGBA": 8,
+        "CMYK": 8,
+        "I;16": 16,
+        "I;16L": 16,
+        "I;16B": 16,
+        "I": 32,
+        "F": 32,
+    }
+
+    bpc = bits_map.get(mode, None)
+    if bpc is None:
+        raise ValueError(f"Unknown mode: {mode}")
+
+    # bits per pixel = bits per channel × number of channels
+    channels = len(im.getbands())
+    bpp = bpc * channels
+
+    return bpc, bpp
+
+def convert_image_to_bit_depth(image: Image.Image, target_bpc: int) -> Image.Image:
+    """
+    Convert image to target color bit depth.
+    
+    Args:
+        image: Input PIL Image
+        target_bpc: Target bits per channel (1, 8, 16, 32)
+    
+    Returns:
+        PIL Image converted to target bit depth
+    """
+    if target_bpc == 1:
+        return image.convert("1")
+    elif target_bpc == 8:
+        return image.convert("RGB")
+    elif target_bpc == 16:
+        return image.convert("I;16")
+    elif target_bpc == 32:
+        return image.convert("F")
+    else:
+        raise ValueError(f"Unsupported target bits per channel: {target_bpc}")
 
 
 class BasePanel:
@@ -42,10 +93,11 @@ class BasePanel:
 class ChannelThumbnail:
     """Widget for displaying channel thumbnails with drag-and-drop"""
     
-    def __init__(self, parent: tk.Widget, channel: str, on_drop_callback, on_clear_callback):
+    def __init__(self, parent: tk.Widget, channel: str, on_drop_callback, on_clear_callback, on_set_channel_image_with_another_channel):
         self.channel = channel
         self.on_drop = on_drop_callback
         self.on_clear = on_clear_callback
+        self.on_set_channel_image_with_another_channel = on_set_channel_image_with_another_channel
         
         self._create_widget(parent)
     
@@ -78,7 +130,8 @@ class ChannelThumbnail:
         
         # Add buttons for each color in additional_container
         for channel_type, color in color_map.items():
-            btn = tk.Button(additional_container, text=channel_type, bg=color, fg="white", width=4, height=1)
+            btn = tk.Button(additional_container, text=channel_type, bg=color, fg="white", width=4, height=1, 
+                            command=lambda ch=channel_type: self.on_set_channel_image_with_another_channel(self.channel, ch))
             btn.pack(side="left", padx=2)
         
         label = tk.Label(header, text=self.channel, font=("Arial", 12, "bold"),
@@ -136,6 +189,10 @@ class ChannelPackerPanel(BasePanel):
         self.drop_handler = FileDropHandler(self._on_file_dropped)
         self.preview_widget = None
         self.output_filename_var = tk.StringVar(value="packed_texture.png")
+        self.output_directory_var = tk.StringVar(value=os.getcwd())
+        self.bit_depth_var = tk.StringVar(value="8")
+        
+        
         super().__init__(parent)
     
     def _setup_ui(self):
@@ -160,14 +217,15 @@ class ChannelPackerPanel(BasePanel):
     def _setup_channel_thumbnails(self):
         """Setup channel thumbnail widgets"""
         square_frame = tk.Frame(self.frame)
-        square_frame.pack(pady=10)
+        square_frame.pack(pady=5)
         
         for idx, channel_type in enumerate(ChannelType):
             channel = channel_type.value
             thumbnail = ChannelThumbnail(
                 square_frame, channel,
                 self._handle_channel_drop,
-                self.model.clear_channel
+                self.model.clear_channel,
+                self.model.set_channel_image_with_another_channel
             )
             thumbnail.container.grid(row=0, column=idx, padx=10)
             self.thumbnails[channel] = thumbnail
@@ -175,23 +233,48 @@ class ChannelPackerPanel(BasePanel):
     def _setup_controls(self):
         """Setup control buttons"""
         button_container = tk.Frame(self.frame)
-        button_container.pack(pady=10)
+        button_container.pack(pady=5)
         
         tk.Button(button_container, text="Preview", font=("Arial", 15),
                  command=self._create_preview).pack(side="left", padx=10)
         tk.Button(button_container, text="Save", font=("Arial", 15),
                  command=self._save_image).pack(side="left", padx=10)
+        
+        # Bit depth selection
+        depth_frame = tk.Frame(self.frame)
+        depth_frame.pack(pady=0)
+        
+        tk.Label(depth_frame, text="Color Depth:", font=("Arial", 12)).pack(side="left", padx=5)
+        
+        tk.Radiobutton(depth_frame, text="8-bit (L)", variable=self.bit_depth_var, 
+                      value="8", font=("Arial", 10)).pack(side="left", padx=5)
+        tk.Radiobutton(depth_frame, text="16-bit (I;16)", variable=self.bit_depth_var, 
+                      value="16", font=("Arial", 10)).pack(side="left", padx=5)
+        tk.Radiobutton(depth_frame, text="24-bit (RGB)", variable=self.bit_depth_var, 
+                      value="24", font=("Arial", 10)).pack(side="left", padx=5)
+        tk.Radiobutton(depth_frame, text="32-bit (RGBA)", variable=self.bit_depth_var, 
+                      value="32", font=("Arial", 10)).pack(side="left", padx=5)
+        
     
     def _setup_preview(self):
         """Setup preview section"""
         preview_container = tk.Frame(self.frame)
-        preview_container.pack(pady=20)
+        preview_container.pack(pady=5)
         
         tk.Label(preview_container, text="Preview", font=("Arial", 12, "bold")).pack()
         
         # Filename entry
         filename_entry = tk.Entry(preview_container, textvariable=self.output_filename_var, width=40)
         filename_entry.pack(pady=5)
+        
+        # Directory save entry
+        dir_frame = tk.Frame(preview_container)
+        dir_frame.pack(pady=5)
+        
+        tk.Label(dir_frame, text="Save to:").pack(side="left", padx=(0, 5))
+        dir_entry = tk.Entry(dir_frame, textvariable=self.output_directory_var, width=100)
+        dir_entry.pack(side="left", padx=5)
+        tk.Button(dir_frame, text="Browse", command=self._browse_directory).pack(side="left", padx=5)
         
         # Preview frame
         preview_frame = tk.Frame(preview_container, width=ImageConfig.PREVIEW_SIZE[0],
@@ -206,29 +289,48 @@ class ChannelPackerPanel(BasePanel):
     
     def _handle_channel_drop(self, event, channel: str):
         """Handle drag-and-drop for channel thumbnails"""
+        print("_handle_channel_drop")
         self.drop_handler.handle_drop(event, channel=channel)
     
     def _on_file_dropped(self, file_path: str, channel: str):
         """Handle file drop on channel"""
+        print("_on_file_dropped")
         try:
             self.model.set_channel_image(channel, file_path)
+            self.output_directory_var.set(os.path.dirname(file_path))
         except Exception as e:
             self.show_error(str(e))
     
     def _create_preview(self):
         """Create preview of merged image"""
         try:
-            self.model.create_merged_image()
+            # Get selected bit depth and convert to integer
+            selected_bit_depth = int(self.bit_depth_var.get())
+            self.model.create_merged_image(target_bit_depth=selected_bit_depth)
         except Exception as e:
             self.show_error(str(e))
     
     def _save_image(self):
         """Save the merged image"""
         try:
-            filename = self.output_filename_var.get() or "merged_texture.png"
-            self.model.save_merged_image(filename)
+            filename = self.output_filename_var.get() or 'merged_texture.png'
+            directory = self.output_directory_var.get() or os.getcwd()
+            full_path = os.path.join(directory, filename)
+            
+            # Ensure we have a merged image with the current bit depth settings
+            if self.model.merged_image is None:
+                selected_bit_depth = int(self.bit_depth_var.get())
+                self.model.create_merged_image(target_bit_depth=selected_bit_depth)
+            
+            self.model.save_merged_image(full_path)
         except Exception as e:
             self.show_error(str(e))
+    
+    def _browse_directory(self):        
+        """Browse for output directory"""
+        directory = filedialog.askdirectory(title="Select output directory")
+        if directory:
+            self.output_directory_var.set(directory)
     
     def _show_full_preview(self):
         """Show full-size preview in new window"""
@@ -240,6 +342,11 @@ class ChannelPackerPanel(BasePanel):
     def on_channel_updated(self, channel: str, image: Image.Image, path: str):
         """Called when a channel is updated"""
         self.thumbnails[channel].update_thumbnail(image, path)
+        
+        color_bit_depth_number = get_color_bit_depth(image)[1]
+        # print("Color bit depth number:", color_bit_depth_number[1])
+        self.bit_depth_var.set(str(color_bit_depth_number))
+        
         self.show_success(f"{channel} channel loaded: {os.path.basename(path)}")
     
     def on_channel_cleared(self, channel: str):
@@ -259,6 +366,7 @@ class ChannelPackerPanel(BasePanel):
     def on_image_saved(self, path: str):
         """Called when image is saved"""
         self.show_success(f"File saved: {path}")
+        
 
 
 class ChannelPreviewWidget:
