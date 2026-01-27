@@ -93,12 +93,12 @@ class BasePanel:
 class ChannelThumbnail:
     """Widget for displaying channel thumbnails with drag-and-drop"""
     
-    def __init__(self, parent: tk.Widget, channel: str, on_drop_callback, on_clear_callback, on_set_channel_image_with_another_channel):
+    def __init__(self, parent: tk.Widget, channel: str, on_drop_callback, on_clear_callback, on_set_channel_image_with_another_channel, on_browse_file):
         self.channel = channel
         self.on_drop = on_drop_callback
         self.on_clear = on_clear_callback
         self.on_set_channel_image_with_another_channel = on_set_channel_image_with_another_channel
-        
+        self.on_browse_file = on_browse_file
         self._create_widget(parent)
     
     def _create_widget(self, parent):
@@ -140,7 +140,12 @@ class ChannelThumbnail:
         
         clear_btn = tk.Button(header, text="✕", fg="black", font=("Arial", 10, "bold"),
                              command=lambda: self.on_clear(self.channel))
-        clear_btn.pack(side="right", padx=(115, 0))
+        clear_btn.pack(side="right", padx=(5, 0))
+        
+        browse_btn = tk.Button(header, text="📁", fg="black", font=("Arial", 10, "bold"),
+                              command=lambda: self.on_browse_file(self.channel))
+        browse_btn.pack(side="right", padx=(86, 0))
+        
         
         # Thumbnail frame
         thumb_frame = tk.Frame(self.container, width=ImageConfig.DROP_SIZE[0], 
@@ -225,7 +230,8 @@ class ChannelPackerPanel(BasePanel):
                 square_frame, channel,
                 self._handle_channel_drop,
                 self.model.clear_channel,
-                self.model.set_channel_image_with_another_channel
+                self.model.set_channel_image_with_another_channel,
+                self._browse_file_for_channel
             )
             thumbnail.container.grid(row=0, column=idx, padx=10)
             self.thumbnails[channel] = thumbnail
@@ -247,14 +253,14 @@ class ChannelPackerPanel(BasePanel):
         tk.Label(depth_frame, text="Color Depth:", font=("Arial", 12)).pack(side="left", padx=5)
         
         tk.Radiobutton(depth_frame, text="8-bit (L)", variable=self.bit_depth_var, 
-                      value="8", font=("Arial", 10)).pack(side="left", padx=5)
+                      value="8", font=("Arial", 10)).pack(side="left", padx=2)
         tk.Radiobutton(depth_frame, text="16-bit (I;16)", variable=self.bit_depth_var, 
-                      value="16", font=("Arial", 10)).pack(side="left", padx=5)
+                      value="16", font=("Arial", 10)).pack(side="left", padx=2)
         tk.Radiobutton(depth_frame, text="24-bit (RGB)", variable=self.bit_depth_var, 
-                      value="24", font=("Arial", 10)).pack(side="left", padx=5)
+                      value="24", font=("Arial", 10)).pack(side="left", padx=2)
         tk.Radiobutton(depth_frame, text="32-bit (RGBA)", variable=self.bit_depth_var, 
-                      value="32", font=("Arial", 10)).pack(side="left", padx=5)
-        
+                      value="32", font=("Arial", 10)).pack(side="left", padx=2)
+        tk.Label(self.frame, text="Downgrading color depth not supported", fg="red").pack(pady=0)
     
     def _setup_preview(self):
         """Setup preview section"""
@@ -367,6 +373,17 @@ class ChannelPackerPanel(BasePanel):
         """Called when image is saved"""
         self.show_success(f"File saved: {path}")
         
+    def _browse_file_for_channel(self, channel: str):
+        """Browse for file for a specific channel"""
+        filetypes = [("PNG files", "*.png"), ("DDS files", "*.dds"), ("All files", "*.*")]
+        filename = filedialog.askopenfilename(title=f"Select image file for {channel} channel", filetypes=filetypes)
+        
+        if filename:
+            try:
+                self.model.set_channel_image(channel, filename)
+                self.output_directory_var.set(os.path.dirname(filename))
+            except Exception as e:
+                self.show_error(str(e))
 
 
 class ChannelPreviewWidget:
@@ -416,7 +433,8 @@ class ChannelPreviewWidget:
         """Clear the preview"""
         self.preview_button.config(image="", bg="lightgray")
         self.preview_button.image = None
-
+        
+ 
 
 class ChannelUnpackerPanel(BasePanel):
     """Panel for channel unpacking functionality"""

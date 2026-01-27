@@ -359,6 +359,33 @@ class ChannelPackerModel:
             self.notify_observers('channel_updated', channel=channel, image=original_image, path=original_path)
         # If no original stored, do nothing (already at original state)
     
+    def load_image(self, image_path: str):
+        """Load image and automatically populate all channels from it"""
+        try:
+            image = Image.open(image_path)
+            # Unpack the image into individual channels
+            channels = ImageProcessor.unpack_channels(image_path)
+            
+            # Set each channel with the corresponding unpacked channel
+            channel_names = ['R', 'G', 'B', 'A']
+            for i, channel_name in enumerate(channel_names):
+                if i < len(channels):
+                    # Create a temporary path for the channel
+                    temp_path = f"{image_path}_{channel_name}"
+                    
+                    # Store as original if this is the first time setting this channel
+                    if channel_name not in self.channel_images:
+                        self.original_channel_paths[channel_name] = temp_path
+                        self.original_channel_images[channel_name] = channels[i]
+                    
+                    self.channel_paths[channel_name] = temp_path
+                    self.channel_images[channel_name] = channels[i]
+                    self.notify_observers('channel_updated', channel=channel_name, image=channels[i], path=temp_path)
+                    
+            self.notify_observers('image_loaded', image=image, path=image_path)
+        except Exception as e:
+            raise ValueError(f"Error loading image: {e}")
+
     def set_channel_image(self, channel: str, image_path: str):
         """Set image for a specific channel"""
         try:
