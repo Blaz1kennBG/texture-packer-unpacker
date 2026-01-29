@@ -3,7 +3,8 @@ import tkinter as tk
 from tkinter import ttk
 import numpy as np
 from PIL import Image
-
+import customtkinter as ctk
+from CTkColorPicker import *
 def get_color_bit_depth(im: Image.Image) -> Tuple[int, int]:
     mode = im.mode
     # map Pillow modes to bits-per-channel
@@ -90,7 +91,7 @@ class BasePanel:
         self.update_status(message, "green")
 
 
-class ChannelThumbnail:
+class   ChannelThumbnail:
     """Widget for displaying channel thumbnails with drag-and-drop"""
     
     def __init__(self, parent: tk.Widget, channel: str, on_drop_callback, on_clear_callback, on_set_channel_image_with_another_channel, on_browse_file):
@@ -144,8 +145,11 @@ class ChannelThumbnail:
         
         browse_btn = tk.Button(header, text="📁", fg="black", font=("Arial", 10, "bold"),
                               command=lambda: self.on_browse_file(self.channel))
-        browse_btn.pack(side="right", padx=(86, 0))
+        browse_btn.pack(side="right", padx=(60, 0))
         
+        blank_image_color_btn = tk.Button(header, text="🎨", fg="black", font=("Arial", 10, "bold"),
+                            command=lambda: self.open_color_picker())
+        blank_image_color_btn.pack(side="right", padx=(5, 0))
         
         # Thumbnail frame
         thumb_frame = tk.Frame(self.container, width=ImageConfig.DROP_SIZE[0], 
@@ -182,7 +186,15 @@ class ChannelThumbnail:
         self.thumb_label.config(image="", bg="lightgray")
         self.thumb_label.image = None
         self.res_label.config(text="")
-
+    def open_color_picker(self):
+        # This uses CustoMTkinter Color Picker
+        # pick_color = AskColor() # open the color picker
+        # color = pick_color.get() # get the color string
+        # print(color)
+        # button.configure(fg_color=color)
+        return
+        
+        
 
 class ChannelPackerPanel(BasePanel):
     """Panel for channel packing functionality"""
