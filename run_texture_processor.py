@@ -29,6 +29,7 @@ def main():
     
     try:
         # Import and run the application
+        # from customtkinter_texture_processor_ui import TextureProcessorApp
         from texture_processor_ui import TextureProcessorApp
         app = TextureProcessorApp()
         app.run()

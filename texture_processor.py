@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 import threading
 from pathlib import Path
-
+import customtkinter as ctk
 
 class ChannelType(Enum):
     """Enum for channel types"""

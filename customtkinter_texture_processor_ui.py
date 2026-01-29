@@ -1,0 +1,517 @@
+import customtkinter as ctk
+from customtkinter import E, EW, N, NE, S, W, Y
+from texture_processor import *
+import tkinter as tk
+
+from tkinter import ttk
+import numpy as np
+from PIL import Image
+import customtkinter as ctk
+from CTkColorPicker import *
+
+def get_color_bit_depth(im: Image.Image) -> Tuple[int, int]:
+    mode = im.mode
+    bits_map = {'1': 1, 'L': 8, 'P': 8, 'RGB': 8, 'RGBA': 8, 'CMYK': 8, 'I;16': 16, 'I;16L': 16, 'I;16B': 16, 'I': 32, 'F': 32}
+    bpc = bits_map.get(mode, None)
+    if bpc is None:
+        raise ValueError(f'Unknown mode: {mode}')
+    channels = len(im.getbands())
+    bpp = bpc * channels
+    return (bpc, bpp)
+
+def convert_image_to_bit_depth(image: Image.Image, target_bpc: int) -> Image.Image:
+    """
+    Convert image to target color bit depth.
+    
+    Args:
+        image: Input PIL Image
+        target_bpc: Target bits per channel (1, 8, 16, 32)
+    
+    Returns:
+        PIL Image converted to target bit depth
+    """
+    if target_bpc == 1:
+        return image.convert('1')
+    elif target_bpc == 8:
+        return image.convert('RGB')
+    elif target_bpc == 16:
+        return image.convert('I;16')
+    elif target_bpc == 32:
+        return image.convert('F')
+    else:
+        raise ValueError(f'Unsupported target bits per channel: {target_bpc}')
+
+class BasePanel:
+    """Base class for UI panels"""
+
+    def __init__(self, parent: tk.Widget):
+        self.parent = parent
+        self.frame = ctk.CTkFrame(parent)
+        self.status_label = None
+        self._setup_ui()
+
+    def _setup_ui(self):
+        """Override in subclasses"""
+        pass
+
+    def show(self):
+        """Show this panel"""
+        self.frame.pack(fill='both', expand=True)
+
+    def hide(self):
+        """Hide this panel"""
+        self.frame.pack_forget()
+
+    def update_status(self, message: str, color: str='purple'):
+        """Update status message"""
+        if self.status_label:
+            self.status_label.configure(text=message, fg_color=color)
+
+    def show_error(self, message: str):
+        """Show error message"""
+        messagebox.showerror('Error', message)
+        self.update_status(f'Error: {message}', 'red')
+
+    def show_success(self, message: str):
+        """Show success message"""
+        self.update_status(message, 'green')
+
+class ChannelThumbnail:
+    """Widget for displaying channel thumbnails with drag-and-drop"""
+
+    def __init__(self, parent: tk.Widget, channel: str, on_drop_callback, on_clear_callback, on_set_channel_image_with_another_channel, on_browse_file):
+        self.channel = channel
+        self.on_drop = on_drop_callback
+        self.on_clear = on_clear_callback
+        self.on_set_channel_image_with_another_channel = on_set_channel_image_with_another_channel
+        self.on_browse_file = on_browse_file
+        self._create_widget(parent)
+
+    def _create_widget(self, parent):
+        """Create the thumbnail widget"""
+        self.container = ctk.CTkFrame(parent)
+        additional_container = ctk.CTkFrame(self.container)
+        additional_container.pack(pady=(0, 4))
+        header = ctk.CTkFrame(self.container)
+        header.pack()
+        color_map = {ChannelType.RED.value: 'red', ChannelType.GREEN.value: 'green', ChannelType.BLUE.value: 'blue', ChannelType.ALPHA.value: 'gray'}
+        ctk.CTkLabel(additional_container, text='Set source as', font=('Arial', 10)).pack(padx=(0, 4))
+        for channel_type, color in color_map.items():
+            btn = ctk.CTkButton(additional_container, text=channel_type, bg_color=color, fg_color='white', width=4, height=1, command=lambda ch=channel_type: self.on_set_channel_image_with_another_channel(self.channel, ch))
+            btn.pack(side='left', padx=2)
+        label = ctk.CTkLabel(header, text=self.channel, font=('Arial', 12, 'bold'), bg_color=color_map[self.channel], fg_color='white', width=2, height=1)
+        label.pack(side='left')
+        clear_btn = ctk.CTkButton(header, text='✕', fg_color='black', font=('Arial', 10, 'bold'), command=lambda: self.on_clear(self.channel))
+        clear_btn.pack(side='right', padx=(5, 0))
+        browse_btn = ctk.CTkButton(header, text='📁', fg_color='black', font=('Arial', 10, 'bold'), command=lambda: self.on_browse_file(self.channel))
+        browse_btn.pack(side='right', padx=(60, 0))
+        blank_image_color_btn = ctk.CTkButton(header, text='🎨', fg_color='black', font=('Arial', 10, 'bold'), command=lambda: self.open_color_picker())
+        blank_image_color_btn.pack(side='right', padx=(5, 0))
+        thumb_frame = ctk.CTkFrame(self.container, width=ImageConfig.DROP_SIZE[0], height=ImageConfig.DROP_SIZE[1])
+        thumb_frame.pack()
+        thumb_frame.grid_propagate(False)
+        self.thumb_label = ctk.CTkLabel(thumb_frame, bg_color='lightgray', width=ImageConfig.DROP_SIZE[0], height=ImageConfig.DROP_SIZE[1])
+        self.thumb_label.place(x=0, y=0,
+                            #    width=ImageConfig.DROP_SIZE[0], height=ImageConfig.DROP_SIZE[1]
+                               )
+        self.thumb_label.drop_target_register(DND_FILES)
+        self.thumb_label.dnd_bind('<<Drop>>', lambda e: self.on_drop(e, self.channel))
+        self.res_label = ctk.CTkLabel(self.container, text='', font=('Arial', 10))
+        self.res_label.pack(pady=(4, 0))
+
+    def update_thumbnail(self, image: Image.Image, image_path: str):
+        """Update the thumbnail display"""
+        thumb = ImageProcessor.create_thumbnail(image, ImageConfig.DROP_SIZE)
+        photo = ImageTk.PhotoImage(thumb)
+        self.thumb_label.configure(image=photo, bg_color=None)
+        self.thumb_label.image = photo
+        w, h = image.size
+        self.res_label.configure(text=f'{w} × {h}')
+
+    def clear_thumbnail(self):
+        """Clear the thumbnail display"""
+        self.thumb_label.configure(image='', bg_color='lightgray')
+        self.thumb_label.image = None
+        self.res_label.configure(text='')
+
+    def open_color_picker(self):
+        return
+
+class ChannelPackerPanel(BasePanel):
+    """Panel for channel packing functionality"""
+
+    def __init__(self, parent: tk.Widget):
+        self.model = ChannelPackerModel()
+        self.model.add_observer(self)
+        self.thumbnails = {}
+        self.drop_handler = FileDropHandler(self._on_file_dropped)
+        self.preview_widget = None
+        self.output_filename_var = tk.StringVar(value='packed_texture.png')
+        self.output_directory_var = tk.StringVar(value=os.getcwd())
+        self.bit_depth_var = tk.StringVar(value='8')
+        super().__init__(parent)
+
+    def _setup_ui(self):
+        """Setup the channel packing UI"""
+        ctk.CTkLabel(self.frame, text='CHANNEL PACKING', font=('Arial', 14), fg_color='green').pack(pady=5)
+        ctk.CTkLabel(self.frame, text='Drag textures onto the squares below:').pack()
+        self._setup_channel_thumbnails()
+        self._setup_controls()
+        self.status_label = ctk.CTkLabel(self.frame, text='', font=('Arial', 12), fg_color='purple')
+        self.status_label.pack(pady=1)
+        self._setup_preview()
+
+    def _setup_channel_thumbnails(self):
+        """Setup channel thumbnail widgets"""
+        square_frame = ctk.CTkFrame(self.frame)
+        square_frame.pack(pady=5)
+        for idx, channel_type in enumerate(ChannelType):
+            channel = channel_type.value
+            thumbnail = ChannelThumbnail(square_frame, channel, self._handle_channel_drop, self.model.clear_channel, self.model.set_channel_image_with_another_channel, self._browse_file_for_channel)
+            thumbnail.container.grid(row=0, column=idx, padx=10)
+            self.thumbnails[channel] = thumbnail
+
+    def _setup_controls(self):
+        """Setup control buttons"""
+        button_container = ctk.CTkFrame(self.frame)
+        button_container.pack(pady=5)
+        ctk.CTkButton(button_container, text='Preview', font=('Arial', 15), command=self._create_preview).pack(side='left')
+        ctk.CTkButton(button_container, text='Save', font=('Arial', 15), command=self._save_image).pack(side='left')
+        depth_frame = ctk.CTkFrame(self.frame)
+        depth_frame.pack(pady=0)
+        ctk.CTkLabel(depth_frame, text='Color Depth:', font=('Arial', 12)).pack(side='left', padx=5)
+        ctk.CTkRadioButton(depth_frame, text='8-bit (L)', variable=self.bit_depth_var, value='8', font=('Arial', 10)).pack(side='left')
+        ctk.CTkRadioButton(depth_frame, text='16-bit (I;16)', variable=self.bit_depth_var, value='16', font=('Arial', 10)).pack(side='left')
+        ctk.CTkRadioButton(depth_frame, text='24-bit (RGB)', variable=self.bit_depth_var, value='24', font=('Arial', 10)).pack(side='left')
+        ctk.CTkRadioButton(depth_frame, text='32-bit (RGBA)', variable=self.bit_depth_var, value='32', font=('Arial', 10)).pack(side='left')
+        ctk.CTkLabel(self.frame, text='Downgrading color depth not supported', fg_color='red').pack(pady=0)
+
+    def _setup_preview(self):
+        """Setup preview section"""
+        preview_container = ctk.CTkFrame(self.frame)
+        preview_container.pack(pady=5)
+        ctk.CTkLabel(preview_container, text='Preview', font=('Arial', 12, 'bold')).pack()
+        filename_entry = ctk.CTkEntry(preview_container, textvariable=self.output_filename_var, width=40)
+        filename_entry.pack(pady=5)
+        dir_frame = ctk.CTkFrame(preview_container)
+        dir_frame.pack(pady=5)
+        ctk.CTkLabel(dir_frame, text='Save to:').pack(side='left', padx=(0, 5))
+        dir_entry = ctk.CTkEntry(dir_frame, textvariable=self.output_directory_var, width=100)
+        dir_entry.pack(side='left', padx=5)
+        ctk.CTkButton(dir_frame, text='Browse', command=self._browse_directory).pack(side='left')
+        preview_frame = ctk.CTkFrame(preview_container, width=ImageConfig.PREVIEW_SIZE[0], height=ImageConfig.PREVIEW_SIZE[1])
+        preview_frame.pack()
+        preview_frame.grid_propagate(False)
+        self.preview_widget = ctk.CTkButton(preview_frame, bg_color='lightgray', text='No preview', command=self._show_full_preview, width=ImageConfig.PREVIEW_SIZE[0], height=ImageConfig.PREVIEW_SIZE[1])
+        self.preview_widget.place(x=0, y=0, 
+                                #   width=ImageConfig.PREVIEW_SIZE[0], height=ImageConfig.PREVIEW_SIZE[1]
+                                  )
+
+    def _handle_channel_drop(self, event, channel: str):
+        """Handle drag-and-drop for channel thumbnails"""
+        print('_handle_channel_drop')
+        self.drop_handler.handle_drop(event, channel=channel)
+
+    def _on_file_dropped(self, file_path: str, channel: str):
+        """Handle file drop on channel"""
+        print('_on_file_dropped')
+        try:
+            self.model.set_channel_image(channel, file_path)
+            self.output_directory_var.set(os.path.dirname(file_path))
+        except Exception as e:
+            self.show_error(str(e))
+
+    def _create_preview(self):
+        """Create preview of merged image"""
+        try:
+            selected_bit_depth = int(self.bit_depth_var.get())
+            self.model.create_merged_image(target_bit_depth=selected_bit_depth)
+        except Exception as e:
+            self.show_error(str(e))
+
+    def _save_image(self):
+        """Save the merged image"""
+        try:
+            filename = self.output_filename_var.get() or 'merged_texture.png'
+            directory = self.output_directory_var.get() or os.getcwd()
+            full_path = os.path.join(directory, filename)
+            if self.model.merged_image is None:
+                selected_bit_depth = int(self.bit_depth_var.get())
+                self.model.create_merged_image(target_bit_depth=selected_bit_depth)
+            self.model.save_merged_image(full_path)
+        except Exception as e:
+            self.show_error(str(e))
+
+    def _browse_directory(self):
+        """Browse for output directory"""
+        directory = filedialog.askdirectory(title='Select output directory')
+        if directory:
+            self.output_directory_var.set(directory)
+
+    def _show_full_preview(self):
+        """Show full-size preview in new window"""
+        if self.model.merged_image:
+            viewer = ZoomableImageViewer(self.frame, 'Merged Image Preview')
+            viewer.display_image(self.model.merged_image)
+
+    def on_channel_updated(self, channel: str, image: Image.Image, path: str):
+        """Called when a channel is updated"""
+        self.thumbnails[channel].update_thumbnail(image, path)
+        color_bit_depth_number = get_color_bit_depth(image)[1]
+        self.bit_depth_var.set(str(color_bit_depth_number))
+        self.show_success(f'{channel} channel loaded: {os.path.basename(path)}')
+
+    def on_channel_cleared(self, channel: str):
+        """Called when a channel is cleared"""
+        self.thumbnails[channel].clear_thumbnail()
+        self.show_success(f'{channel} channel cleared')
+
+    def on_image_merged(self, image: Image.Image):
+        """Called when image is merged"""
+        thumb = ImageProcessor.create_thumbnail(image, ImageConfig.PREVIEW_SIZE)
+        photo = ImageTk.PhotoImage(thumb)
+        self.preview_widget.configure(image=photo, bg_color=None, text='')
+        self.preview_widget.image = photo
+        self.show_success('Image merged successfully')
+
+    def on_image_saved(self, path: str):
+        """Called when image is saved"""
+        self.show_success(f'File saved: {path}')
+
+    def _browse_file_for_channel(self, channel: str):
+        """Browse for file for a specific channel"""
+        filetypes = [('PNG files', '*.png'), ('DDS files', '*.dds'), ('All files', '*.*')]
+        filename = filedialog.askopenfilename(title=f'Select image file for {channel} channel', filetypes=filetypes)
+        if filename:
+            try:
+                self.model.set_channel_image(channel, filename)
+                self.output_directory_var.set(os.path.dirname(filename))
+            except Exception as e:
+                self.show_error(str(e))
+
+class ChannelPreviewWidget:
+    """Widget for previewing individual channels"""
+
+    def __init__(self, parent: tk.Widget, channel: str, on_click_callback):
+        self.channel = channel
+        self.on_click = on_click_callback
+        self._create_widget(parent)
+
+    def _create_widget(self, parent):
+        """Create the preview widget"""
+        self.container = ctk.CTkFrame(parent)
+        color_map = {ChannelType.RED.value: 'red', ChannelType.GREEN.value: 'green', ChannelType.BLUE.value: 'blue', ChannelType.ALPHA.value: 'gray'}
+        ctk.CTkLabel(self.container, text=self.channel, font=('Arial', 12, 'bold'), bg_color=color_map[self.channel], fg_color='white', width=2, height=1).pack()
+        preview_frame = ctk.CTkFrame(self.container, width=ImageConfig.CHANNEL_PREVIEW_SIZE[0], height=ImageConfig.CHANNEL_PREVIEW_SIZE[1])
+        preview_frame.pack()
+        preview_frame.grid_propagate(False)
+        self.preview_button = ctk.CTkButton(preview_frame, bg_color='lightgray', command=lambda: self.on_click(self.channel),
+                                            width=ImageConfig.CHANNEL_PREVIEW_SIZE[0], height=ImageConfig.CHANNEL_PREVIEW_SIZE[1])
+        self.preview_button.place(x=0, y=0, 
+                                #   width=ImageConfig.CHANNEL_PREVIEW_SIZE[0], height=ImageConfig.CHANNEL_PREVIEW_SIZE[1]
+                                  
+                                  )
+
+    def update_preview(self, image: Image.Image):
+        """Update the preview with channel image"""
+        rgb_image = Image.merge('RGB', (image, image, image))
+        thumb = ImageProcessor.create_thumbnail(rgb_image, ImageConfig.CHANNEL_PREVIEW_SIZE)
+        photo = ImageTk.PhotoImage(thumb)
+        self.preview_button.configure(image=photo, bg_color=None)
+        self.preview_button.image = photo
+
+    def clear_preview(self):
+        """Clear the preview"""
+        self.preview_button.configure(image='', bg_color='lightgray')
+        self.preview_button.image = None
+
+class ChannelUnpackerPanel(BasePanel):
+    """Panel for channel unpacking functionality"""
+
+    def __init__(self, parent: tk.Widget):
+        self.model = ChannelUnpackerModel()
+        self.model.add_observer(self)
+        self.drop_handler = FileDropHandler(self._on_file_dropped)
+        self.file_path_var = tk.StringVar()
+        self.gamma_correction_var = tk.BooleanVar(value=False)
+        self.drop_label = None
+        self.channel_previews = {}
+        self.active_channel = None
+        super().__init__(parent)
+
+    def _setup_ui(self):
+        """Setup the channel unpacking UI"""
+        ctk.CTkLabel(self.frame, text='CHANNEL UNPACKING', font=('Arial', 14), fg_color='blue').pack(pady=5)
+        self._setup_drop_area()
+        self._setup_file_selection()
+        self._setup_options()
+        self._setup_controls()
+        self.status_label = ctk.CTkLabel(self.frame, text='', font=('Arial', 12), fg_color='purple')
+        self.status_label.pack(pady=1)
+        self._setup_channel_previews()
+
+    def _setup_drop_area(self):
+        """Setup drag-and-drop area"""
+        ctk.CTkLabel(self.frame, text='Drag a texture here:').pack(pady=(10, 5))
+        drop_frame = ctk.CTkFrame(self.frame, width=ImageConfig.PREVIEW_SIZE[0], height=ImageConfig.PREVIEW_SIZE[1])
+        drop_frame.pack()
+        drop_frame.grid_propagate(False)
+        self.drop_label = ctk.CTkLabel(drop_frame, text='Drop Image Here', bg_color='lightgray',
+                                        width=ImageConfig.PREVIEW_SIZE[0], height=ImageConfig.PREVIEW_SIZE[1]
+                                       )
+        self.drop_label.place(x=0, y=0, 
+                            #   width=ImageConfig.PREVIEW_SIZE[0], height=ImageConfig.PREVIEW_SIZE[1]
+                              )
+        self.drop_label.drop_target_register(DND_FILES)
+        self.drop_label.dnd_bind('<<Drop>>', self.drop_handler.handle_drop)
+
+    def _setup_file_selection(self):
+        """Setup file selection controls"""
+        input_frame = ctk.CTkFrame(self.frame)
+        input_frame.pack(pady=10)
+        ctk.CTkLabel(input_frame, text='Or choose file:').pack(side='left', padx=5)
+        file_entry = ctk.CTkEntry(input_frame, textvariable=self.file_path_var, width=40, state='readonly')
+        file_entry.pack(side='left', padx=5)
+        ctk.CTkButton(input_frame, text='Browse', command=self._browse_file).pack(side='left')
+
+    def _setup_options(self):
+        """Setup option controls"""
+        options_frame = ctk.CTkFrame(self.frame)
+        options_frame.pack(pady=(0, 15))
+        ctk.CTkCheckBox(options_frame, text='Apply Gamma Correction', variable=self.gamma_correction_var).pack()
+
+    def _setup_controls(self):
+        """Setup control buttons"""
+        controls_frame = ctk.CTkFrame(self.frame)
+        controls_frame.pack(pady=10)
+        ctk.CTkButton(controls_frame, text='Preview', font=('Arial', 13), command=self._create_preview).pack(side='left')
+        ctk.CTkButton(controls_frame, text='Save Channels', font=('Arial', 13), command=self._save_channels).pack(side='left')
+
+    def _setup_channel_previews(self):
+        """Setup channel preview widgets"""
+        ctk.CTkLabel(self.frame, text='Channel Previews:', font=('Arial', 12, 'bold')).pack(pady=(15, 5))
+        channels_frame = ctk.CTkFrame(self.frame)
+        channels_frame.pack()
+        for idx, channel_type in enumerate(ChannelType):
+            channel = channel_type.value
+            preview = ChannelPreviewWidget(channels_frame, channel, self._on_channel_clicked)
+            preview.container.grid(row=0, column=idx, padx=5)
+            self.channel_previews[channel] = preview
+
+    def _on_file_dropped(self, file_path: str):
+        """Handle file drop"""
+        try:
+            self.model.load_image(file_path)
+            self.file_path_var.set(file_path)
+        except Exception as e:
+            self.show_error(str(e))
+
+    def _browse_file(self):
+        """Browse for file"""
+        filetypes = [('PNG files', '*.png'), ('DDS files', '*.dds'), ('All files', '*.*')]
+        filename = filedialog.askopenfilename(title='Select image file', filetypes=filetypes)
+        if filename:
+            try:
+                self.model.load_image(filename)
+                self.file_path_var.set(filename)
+            except Exception as e:
+                self.show_error(str(e))
+
+    def _on_gamma_changed(self):
+        """Handle gamma correction option change"""
+        self.model.apply_gamma_correction = self.gamma_correction_var.get()
+
+    def _create_preview(self):
+        """Create channel preview"""
+        try:
+            self.model.unpack_channels()
+        except Exception as e:
+            self.show_error(str(e))
+
+    def _save_channels(self):
+        """Save unpacked channels"""
+        try:
+            output_dir = f'{Path(self.model.source_path).stem}_unpacked' if self.model.source_path else 'unpacked_channels'
+            saved_files = self.model.save_channels(output_dir)
+            self.show_success(f'Channels saved to: {output_dir}')
+        except Exception as e:
+            self.show_error(str(e))
+
+    def _on_channel_clicked(self, channel: str):
+        """Handle channel preview click"""
+        self.active_channel = channel
+        if self.model.unpacked_channels:
+            channel_idx = list(ChannelType)[ord(channel) - ord('R') if channel != 'A' else 3].value
+            channel_idx = ['R', 'G', 'B', 'A'].index(channel)
+            viewer = ZoomableImageViewer(self.frame, f'{channel} Channel Preview')
+            channel_img = self.model.unpacked_channels[channel_idx]
+            rgb_img = Image.merge('RGB', (channel_img, channel_img, channel_img))
+            viewer.display_image(rgb_img)
+
+    def on_image_loaded(self, image: Image.Image, path: str):
+        """Called when image is loaded"""
+        thumb = ImageProcessor.create_thumbnail(image, ImageConfig.PREVIEW_SIZE)
+        photo = ImageTk.PhotoImage(thumb)
+        self.drop_label.configure(image=photo, bg_color=None, text='')
+        self.drop_label.image = photo
+        self.show_success(f'Image loaded: {os.path.basename(path)}')
+
+    def on_channels_unpacked(self, channels: List[Image.Image]):
+        """Called when channels are unpacked"""
+        for idx, channel_type in enumerate(ChannelType):
+            channel = channel_type.value
+            self.channel_previews[channel].update_preview(channels[idx])
+        self.show_success('Channels unpacked successfully')
+
+    def on_channels_saved(self, files: List[str]):
+        """Called when channels are saved"""
+        self.show_success(f'Saved {len(files)} channel files')
+
+class TextureProcessorApp:
+    """Main application class"""
+
+    def __init__(self):
+        self.root = TkinterDnD.Tk()
+        self.root.title('Texture Channel Processor')
+        self.root.geometry('800x900')
+        self.current_panel = None
+        self.panels = {}
+        self._setup_ui()
+        self._show_panel('packer')
+
+    def _setup_ui(self):
+        """Setup the main UI"""
+        nav_frame = ctk.CTkFrame(self.root)
+        nav_frame.pack(pady=10)
+        ctk.CTkButton(nav_frame, text='Channel Packer', font=('Arial', 12), command=lambda: self._show_panel('packer')).pack(side='left')
+        ctk.CTkButton(nav_frame, text='Channel Unpacker', font=('Arial', 12), command=lambda: self._show_panel('unpacker')).pack(side='left')
+        self.content_frame = ctk.CTkFrame(self.root)
+        self.content_frame.pack(fill='both', expand=True)
+        self.panels['packer'] = ChannelPackerPanel(self.content_frame)
+        self.panels['unpacker'] = ChannelUnpackerPanel(self.content_frame)
+
+    def _show_panel(self, panel_name: str):
+        """Show specific panel"""
+        if self.current_panel:
+            self.panels[self.current_panel].hide()
+        self.current_panel = panel_name
+        self.panels[panel_name].show()
+
+    def run(self):
+        """Run the application"""
+        try:
+            self.root.mainloop()
+        except KeyboardInterrupt:
+            self.root.destroy()
+
+def main():
+    """Main entry point"""
+    try:
+        app = TextureProcessorApp()
+        app.run()
+    except Exception as e:
+        print(f'Application error: {e}')
+        messagebox.showerror('Application Error', f'An error occurred: {e}')
+
+if __name__ == '__main__':
+    main()
