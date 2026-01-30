@@ -19,6 +19,10 @@ class ChannelType(Enum):
     ALPHA = "A"
 
 
+TEMP_DIR = "temp_channels"
+
+
+
 @dataclass
 class ImageConfig:
     """Configuration class for image processing"""
@@ -165,7 +169,7 @@ class ImageProcessor:
         channel_names = ["R", "G", "B", "A"]
         
         for i, channel in enumerate(channels):
-            filename = f"{base_name}_{channel_names[i]}.png"
+            filename = f"{base_name}_CHANNEL_{channel_names[i]}.png"
             filepath = os.path.join(output_dir, filename)
             channel.save(filepath)
             saved_files.append(filepath)
@@ -342,6 +346,54 @@ class ChannelPackerModel:
         self.channel_images[curr_channel] = image
         self.notify_observers('channel_updated', channel=curr_channel, image=image, path=self.channel_paths[source_channel])
     
+    def set_channel_image_to_color(self, channel: str, hex_color: str):
+        """Set image for a specific channel to a solid color"""
+        # Convert hex color to RGB
+        
+        default_size = (256, 256)
+        
+        # Find the largest existing image size
+        if self.channel_images:
+           
+            for img in self.channel_images.values():
+                img_size = img.size                
+                if img_size[0] * img_size[1] > default_size[0] * default_size[1]:
+                    default_size = img_size
+            
+        
+        hex_color = hex_color.lstrip('#')
+        r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+        
+        # Create solid color image
+        size = default_size
+        color_image = Image.new("RGB", size, 255)  # White channel
+        
+        if channel == ChannelType.RED.value:
+            color_image = Image.new("RGB", size, color=(r, g, b))
+        elif channel == ChannelType.GREEN.value:
+            color_image = Image.new("RGB", size, color=(r, g, b))
+        elif channel == ChannelType.BLUE.value:
+            color_image = Image.new("RGB", size, color=(r, g, b))
+        elif channel == ChannelType.ALPHA.value:
+            color_image = Image.new("RGB", size, color=(r, g, b)).convert("L")
+            
+      
+        if (os.path.isdir(TEMP_DIR) == False):
+            os.mkdir(TEMP_DIR)
+        temp_path = os.path.join(TEMP_DIR, f"solid_color_{hex_color}.png")
+        
+        color_image.save(temp_path)
+        
+        # Store original before overwriting (if not already stored)
+        if channel not in self.original_channel_images and channel in self.channel_images:
+            self.original_channel_paths[channel] = self.channel_paths[channel]
+            self.original_channel_images[channel] = self.channel_images[channel]
+        
+        # Set the new color image
+        self.channel_paths[channel] = temp_path
+        self.channel_images[channel] = color_image
+        self.notify_observers('channel_updated', channel=channel, image=color_image, path=self.channel_paths[channel])
+    
     def restore_original_channel(self, channel: str):
         """Restore original image for a channel"""
         if channel in self.original_channel_images:
@@ -417,6 +469,7 @@ class ChannelPackerModel:
         """Create merged image from all channels with specified bit depth"""
         try:
             # First create the merged RGBA image
+            print("Creating merged image with channels:", self.channel_paths)
             merged_rgba = ImageProcessor.pack_channels(
                 r_path=self.channel_paths[ChannelType.RED.value],
                 g_path=self.channel_paths[ChannelType.GREEN.value],
@@ -489,6 +542,70 @@ class ChannelUnpackerModel:
             self.notify_observers('image_loaded', image=self.source_image, path=image_path)
         except Exception as e:
             raise ValueError(f"Error loading image: {e}")
+    
+    def bulk_unpack_channels(self, image_paths: List[str], output_dir: str, progress_callback=None) -> Dict[str, List[str]]:
+        """
+        Bulk unpack multiple images into channels
+        
+        Args:
+            image_paths: List of image file paths to process
+            output_dir: Directory to save unpacked channels
+            progress_callback: Optional callback function for progress updates (current_index, total_count, current_file)
+        
+        Returns:
+            Dictionary mapping source file paths to their saved channel file paths
+        """
+        if not image_paths:
+            raise ValueError("No image paths provided for bulk unpacking")
+        
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        results = {}
+        total_count = len(image_paths)
+        
+        for i, image_path in enumerate(image_paths):
+            try:
+                # Update progress if callback provided
+                if progress_callback:
+                    progress_callback(i, total_count, image_path)
+                
+                # Validate image format
+                if not ImageProcessor.validate_image_format(image_path):
+                    raise ValueError(f"Unsupported image format: {image_path}")
+                
+                # Unpack channels
+                channels = ImageProcessor.unpack_channels(image_path, self.apply_gamma_correction)
+                
+                # Generate base filename
+                base_name = Path(image_path).stem
+                
+                # Create a new folder for each image to put the channels
+                image_output_dir = os.path.join(output_dir, base_name)
+                os.makedirs(image_output_dir, exist_ok=True)
+                
+                # Save channels
+                saved_files = ImageProcessor.save_channels(channels, image_output_dir, base_name)
+                results[image_path] = saved_files
+                
+                self.notify_observers('bulk_channels_unpacked',
+                                    current_file=image_path, 
+                                    saved_files=saved_files,
+                                    progress=i + 1,
+                                    total=total_count)
+                
+            except Exception as e:
+                error_msg = f"Error processing {image_path}: {e}"
+                results[image_path] = error_msg
+                self.notify_observers('bulk_unpack_error', 
+                                    file=image_path, 
+                                    error=error_msg,
+                                    progress=i + 1,
+                                    total=total_count)
+        
+        # Notify completion
+        self.notify_observers('bulk_unpack_completed', results=results)
+        return results
     
     def unpack_channels(self):
         """Unpack the loaded image into channels"""

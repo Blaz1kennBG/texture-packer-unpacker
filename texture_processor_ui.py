@@ -5,6 +5,9 @@ import numpy as np
 from PIL import Image
 import customtkinter as ctk
 from CTkColorPicker import *
+from tkinter import colorchooser
+from os.path import isfile, join
+
 def get_color_bit_depth(im: Image.Image) -> Tuple[int, int]:
     mode = im.mode
     # map Pillow modes to bits-per-channel
@@ -91,15 +94,16 @@ class BasePanel:
         self.update_status(message, "green")
 
 
-class   ChannelThumbnail:
+class ChannelThumbnail:
     """Widget for displaying channel thumbnails with drag-and-drop"""
     
-    def __init__(self, parent: tk.Widget, channel: str, on_drop_callback, on_clear_callback, on_set_channel_image_with_another_channel, on_browse_file):
+    def __init__(self, parent: tk.Widget, channel: str, on_drop_callback, on_clear_callback, on_set_channel_image_with_another_channel, on_browse_file, on_color_select):
         self.channel = channel
         self.on_drop = on_drop_callback
         self.on_clear = on_clear_callback
         self.on_set_channel_image_with_another_channel = on_set_channel_image_with_another_channel
         self.on_browse_file = on_browse_file
+        self.on_color_select = on_color_select
         self._create_widget(parent)
     
     def _create_widget(self, parent):
@@ -192,6 +196,11 @@ class   ChannelThumbnail:
         # color = pick_color.get() # get the color string
         # print(color)
         # button.configure(fg_color=color)
+        color_code = colorchooser.askcolor(title ="Choose color for empty image channel")
+        hex_color = color_code[1]
+        if hex_color:
+            self.on_color_select(self.channel, hex_color)
+            return
         return
         
         
@@ -243,7 +252,8 @@ class ChannelPackerPanel(BasePanel):
                 self._handle_channel_drop,
                 self.model.clear_channel,
                 self.model.set_channel_image_with_another_channel,
-                self._browse_file_for_channel
+                self._browse_file_for_channel,
+                self.model.set_channel_image_to_color
             )
             thumbnail.container.grid(row=0, column=idx, padx=10)
             self.thumbnails[channel] = thumbnail
@@ -355,6 +365,8 @@ class ChannelPackerPanel(BasePanel):
         if self.model.merged_image:
             viewer = ZoomableImageViewer(self.frame, "Merged Image Preview")
             viewer.display_image(self.model.merged_image)
+    
+    
     
     # Model observer methods
     def on_channel_updated(self, channel: str, image: Image.Image, path: str):
@@ -620,6 +632,204 @@ class ChannelUnpackerPanel(BasePanel):
         """Called when channels are saved"""
         self.show_success(f"Saved {len(files)} channel files")
 
+class BulkChannelUnpackerPanel(BasePanel):
+    """Panel for channel unpacking functionality"""
+    
+    def __init__(self, parent: tk.Widget):
+        self.model = ChannelUnpackerModel()
+        self.model.add_observer(self)
+        # self.drop_handler = FileDropHandler(self._on_file_dropped)
+        self.output_folder_var = tk.StringVar()
+        self.input_folder_var = tk.StringVar()
+        self.total_images = []
+        self.processed_images = []
+
+        super().__init__(parent)
+    
+    def _setup_ui(self):
+        """Setup the channel unpacking UI"""
+        # Title
+        tk.Label(self.frame, text="BULK CHANNEL UNPACKING", font=("Arial", 14), fg="blue").pack(pady=5)
+        
+        # Input folder selection
+        input_frame = tk.Frame(self.frame)
+        input_frame.pack(pady=10, fill="x", padx=20)
+        
+        tk.Label(input_frame, text="Input Folder:", font=("Arial", 12)).pack(anchor="w")
+        input_folder_frame = tk.Frame(input_frame)
+        input_folder_frame.pack(fill="x", pady=(5, 15))
+        
+        self.input_folder_var = tk.StringVar()
+        input_entry = tk.Entry(input_folder_frame, textvariable=self.input_folder_var, width=30, state="readonly", font=("Arial", 20))
+        input_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        tk.Button(input_folder_frame, text="Browse", command=self._browse_input_folder).pack(side="right")
+        
+        # Output folder selection
+        tk.Label(input_frame, text="Output Folder:", font=("Arial", 12)).pack(anchor="w")
+        output_folder_frame = tk.Frame(input_frame)
+        output_folder_frame.pack(fill="x", pady=5)
+        
+        self.output_folder_var = tk.StringVar()
+        output_entry = tk.Entry(output_folder_frame, textvariable=self.output_folder_var, width=30, state="readonly", font=("Arial", 20))
+        output_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        tk.Button(output_folder_frame, text="Browse", command=self._browse_output_folder).pack(side="right")
+
+        tk.Button(self.frame, text="Start Unpacking", font=("Arial", 15), 
+                 command=self._start_bulk_unpacking).pack(pady=20)
+    
+        # Progress bar
+        self.progress_frame = tk.Frame(self.frame)
+        self.progress_frame.pack(pady=10, fill="x", padx=20)
+        
+        tk.Label(self.progress_frame, text="Progress:", font=("Arial", 12)).pack(anchor="w")
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(self.progress_frame, variable=self.progress_var, maximum=100)
+        self.progress_bar.pack(fill="x", pady=(5, 0))
+        
+        self.progress_label = tk.Label(self.progress_frame, text="Ready", font=("Arial", 10))
+        self.progress_label.pack(anchor="w", pady=(2, 0))
+        
+        # Status label
+        self.status_label = tk.Label(self.frame, text="", font=("Arial", 12), fg="purple")
+        self.status_label.pack(pady=1)
+    
+        # Process log
+        tk.Label(self.frame, text="Processing Log:", font=("Arial", 12, "bold")).pack(anchor="w", padx=20, pady=(10, 5))
+        process_items_frame = tk.Frame(self.frame)
+        process_items_frame.pack(pady=5, fill="both", expand=True, padx=20)
+        
+        scrollbar = ttk.Scrollbar(process_items_frame)
+        scrollbar.pack(side="right", fill="y")
+        
+        self.log_listbox = tk.Listbox(process_items_frame, height=15, yscrollcommand=scrollbar.set)
+        self.log_listbox.pack(side="left", fill="both", expand=True)
+        
+        scrollbar.config(command=self.log_listbox.yview)
+    
+    
+    
+    def _start_bulk_unpacking(self):
+        """Start the bulk unpacking process"""
+        input_folder = self.input_folder_var.get()
+        output_folder = self.output_folder_var.get()
+        
+        # Validation
+        if not input_folder:
+            self.show_error("Please select an input folder")
+            return
+        
+        if not output_folder:
+            self.show_error("Please select an output folder")
+            return
+        
+        if not self.total_images:
+            self.show_error("No supported image files found in input folder")
+            return
+        
+        # Clear previous results
+        self.log_listbox.delete(0, tk.END)
+        self.processed_images = []
+        self.progress_var.set(0)
+        self.progress_label.config(text=f"Processing {len(self.total_images)} images...")
+        
+        # Build full paths
+        image_paths = [os.path.join(input_folder, img) for img in self.total_images]
+        
+        try:
+            # Start bulk unpacking with progress callback
+            self.model.bulk_unpack_channels(
+                image_paths, 
+                output_folder, 
+                progress_callback=self._update_progress
+            )
+        except Exception as e:
+            self.show_error(str(e))
+    
+    def _browse_input_folder(self):
+        """Browse for input folder"""
+        folder = filedialog.askdirectory(title="Select input folder containing images")
+        if folder:
+            self.input_folder_var.set(folder)
+            self.total_images = [f for f in os.listdir(folder) if isfile(join(folder, f)) and f.lower().endswith(('.png', '.dds'))]
+            
+    
+    def _browse_output_folder(self):
+        """Browse for output folder"""
+        folder = filedialog.askdirectory(title="Select output folder for unpacked channels")
+        if folder:
+            self.output_folder_var.set(folder)
+    
+    def _update_progress(self, current_index: int, total_count: int, current_file: str):
+        """Update progress display during bulk processing"""
+        progress_percent = (current_index / total_count) * 100
+        self.progress_var.set(progress_percent)
+        self.progress_label.config(text=f"Processing {current_index + 1}/{total_count}: {os.path.basename(current_file)}")
+        
+        # Force UI update
+        self.frame.update_idletasks()
+
+    def _on_file_dropped(self, file_path: str):
+        """Handle file drop"""
+        return
+
+    # Model observer methods
+    def on_bulk_channels_unpacked(self, current_file: str, saved_files: List[str], progress: int, total: int):
+        """Called when a file is successfully processed during bulk unpacking"""
+        self.processed_images.append(current_file)
+        filename = os.path.basename(current_file)
+        
+        # Add success entry to log
+        log_entry = f"✓ {filename} → {len(saved_files)} channels saved"
+        self.log_listbox.insert(tk.END, log_entry)
+        self.log_listbox.see(tk.END)  # Auto-scroll to bottom
+        
+        # Update progress
+        progress_percent = (progress / total) * 100
+        self.progress_var.set(progress_percent)
+        self.progress_label.config(text=f"Processed {progress}/{total}: {filename}")
+        
+        # Force UI update
+        self.frame.update_idletasks()
+    
+    def on_bulk_unpack_error(self, file: str, error: str, progress: int, total: int):
+        """Called when an error occurs during bulk unpacking"""
+        filename = os.path.basename(file)
+        
+        # Add error entry to log
+        log_entry = f"✗ {filename} → ERROR: {error}"
+        self.log_listbox.insert(tk.END, log_entry)
+        self.log_listbox.see(tk.END)  # Auto-scroll to bottom
+        
+        # Update progress
+        progress_percent = (progress / total) * 100
+        self.progress_var.set(progress_percent)
+        self.progress_label.config(text=f"Error processing {progress}/{total}: {filename}")
+        
+        # Force UI update
+        self.frame.update_idletasks()
+    
+    def on_bulk_unpack_completed(self, results: Dict[str, Union[List[str], str]]):
+        """Called when bulk unpacking is completed"""
+        success_count = sum(1 for result in results.values() if isinstance(result, list))
+        error_count = len(results) - success_count
+        
+        # Final progress update
+        self.progress_var.set(100)
+        self.progress_label.config(text=f"Completed: {success_count} successful, {error_count} errors")
+        
+        # Add completion summary to log
+        self.log_listbox.insert(tk.END, "")
+        self.log_listbox.insert(tk.END, f"=== COMPLETED ===")
+        self.log_listbox.insert(tk.END, f"Total files: {len(results)}")
+        self.log_listbox.insert(tk.END, f"Successful: {success_count}")
+        self.log_listbox.insert(tk.END, f"Errors: {error_count}")
+        self.log_listbox.see(tk.END)
+        
+        # Show completion message
+        if error_count == 0:
+            self.show_success(f"Bulk unpacking completed! Processed {success_count} files successfully.")
+        else:
+            self.update_status(f"Bulk unpacking completed with {error_count} errors. Check log for details.", "orange")
 
 class TextureProcessorApp:
     """Main application class"""
@@ -645,7 +855,8 @@ class TextureProcessorApp:
                  command=lambda: self._show_panel("packer")).pack(side="left", padx=10)
         tk.Button(nav_frame, text="Channel Unpacker", font=("Arial", 12),
                  command=lambda: self._show_panel("unpacker")).pack(side="left", padx=10)
-        
+        tk.Button(nav_frame, text="Bulk Channel Unpacker", font=("Arial", 12),
+                 command=lambda: self._show_panel("bulk_unpacker")).pack(side="left", padx=10)
         # Content area
         self.content_frame = tk.Frame(self.root)
         self.content_frame.pack(fill="both", expand=True)
@@ -653,6 +864,7 @@ class TextureProcessorApp:
         # Create panels
         self.panels["packer"] = ChannelPackerPanel(self.content_frame)
         self.panels["unpacker"] = ChannelUnpackerPanel(self.content_frame)
+        self.panels["bulk_unpacker"] = BulkChannelUnpackerPanel(self.content_frame)
     
     def _show_panel(self, panel_name: str):
         """Show specific panel"""
