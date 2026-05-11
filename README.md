@@ -1,7 +1,7 @@
 
 # Texture Channel Processor
 
-A professional-grade tool for packing and unpacking texture channels in game development workflows. This application allows you to combine multiple grayscale textures into a single RGBA texture and vice versa.
+A tool for packing and unpacking texture channels in game development workflows. This application allows you to combine multiple grayscale textures into a single RGBA texture and vice versa.
 
 ## Features
 
